@@ -1,54 +1,51 @@
-# ExamPlatform
+# Online Exam Platform
 
-A simple, production-ready online exam platform.
+A multilingual full-stack online examination platform built with **React, TypeScript, Express, and Supabase**.
 
 ## Tech Stack
 
-- **Frontend:** React + TypeScript + Vite + React Router
-- **Backend:** Express + TypeScript (minimal API scaffold)
-- **Styling:** Plain CSS with design tokens (no UI framework)
+* **Frontend:** React + TypeScript + Vite
+* **Backend:** Express + TypeScript
+* **Database:** Supabase
+* **Translation:** Local Python translation service
+* **Styling:** CSS
 
-## Project Structure
+## Features
 
-```
-xmwindow/
-├── client/          # React frontend
-│   └── src/
-│       ├── components/layout/   # Header, Footer, Layout shell
-│       ├── pages/               # Route pages (Home, About, 404)
-│       └── styles/              # Global CSS and variables
-├── server/          # Express API (health check only for now)
-└── package.json     # Root scripts to run both
-```
+### Creator Portal
+
+* Create and publish exams
+* Auto-save question editing
+* Option text and image support
+* Exam preview
+* Shareable public exam links
+
+### Student Portal
+
+* Public exam access without login
+* Language selection
+* Multilingual question support
+* 5-question pagination
+* Question shuffle on refresh
+* Timer continuity
+* Final submission confirmation
 
 ## Getting Started
 
-Install dependencies:
-
 ```bash
 npm install
-npm install --prefix client
-npm install --prefix server
-```
-
-Run development (frontend + backend):
-
-```bash
 npm run dev
 ```
 
-- Frontend: http://localhost:5173
-- Backend: http://localhost:3001
+* Frontend: http://localhost:5173
+* Backend: http://localhost:3001
 
-## What's Included
+## Project Structure
 
-- Responsive layout with sticky header and mobile navigation
-- Client-side routing (`/`, `/about`, 404)
-- Global styling with CSS variables
-- Minimal Express server with `/api/health` endpoint
+```text
+client/      React frontend
+server/      Express backend
+reference/   Screenshots
+```
 
-## Not Yet Implemented
-
-- Exam system
-- Authentication
-- Database
+> This project was developed as a real-world freelance online examination platform.
