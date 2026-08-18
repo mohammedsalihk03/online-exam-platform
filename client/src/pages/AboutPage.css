@@ -1,0 +1,29 @@
+.about {
+  background-color: var(--color-bg);
+}
+
+.about-inner {
+  max-width: var(--container-max);
+}
+
+.about-content {
+  display: grid;
+  gap: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .about-content {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-5);
+  }
+}
+
+.about-card h3 {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-base);
+}
+
+.about-card p {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
