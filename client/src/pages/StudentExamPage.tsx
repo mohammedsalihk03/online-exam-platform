@@ -144,8 +144,54 @@ export function StudentExamPage() {
     }))
   }
 
-  function handleStartExam() {
+  async function handleStartExam() {
     if (!publicToken) return
+    
+    setLoading(true)
+
+    let finalQuestions = [...questions]
+    let retryAttempted = false
+
+    try {
+      const fetchAndCheck = async () => {
+        const data = await getPublicExamApi(publicToken)
+        if (data && data.questions && data.questions.length > 0) {
+          const firstQ = data.questions[0]
+          const hasTranslation = selectedLanguage === 'English' || 
+            (firstQ.translations || []).some((t: any) => t.language && t.language.toLowerCase() === selectedLanguage.toLowerCase())
+          return { data, hasTranslation }
+        }
+        return { data: null, hasTranslation: false }
+      }
+
+      let result = await fetchAndCheck()
+      
+      if (!result.hasTranslation && selectedLanguage !== 'English') {
+        // Wait 2 seconds and retry once for background translations to finish
+        await new Promise(r => setTimeout(r, 2000))
+        result = await fetchAndCheck()
+        retryAttempted = true
+      }
+
+      if (retryAttempted && !result.hasTranslation) {
+        console.warn(`Translation for ${selectedLanguage} not found after retry. Proceeding with available data.`)
+      }
+
+      if (result.data && result.data.questions) {
+        // Apply the previously established shuffle order to the newly fetched question array
+        const fetchedQuestionsMap = new Map(result.data.questions.map((q: any) => [q.id, q]))
+        finalQuestions = questions.map((existingQ) => {
+          const freshQ = fetchedQuestionsMap.get(existingQ.id)
+          return freshQ || existingQ
+        })
+        setQuestions(finalQuestions)
+      }
+
+    } catch (error) {
+      console.warn('Failed to refetch exam data on start:', error)
+      // Proceed using existing (pre-refetch) questions state
+    }
+
     const durationSeconds = (exam?.durationMinutes || 90) * 60
     const session = {
       language: selectedLanguage,
@@ -154,6 +200,7 @@ export function StudentExamPage() {
     savePublicExamSession(publicToken, session)
     setSecondsRemaining(durationSeconds)
     setHasStarted(true)
+    setLoading(false)
   }
 
   async function handleSubmitExam() {
