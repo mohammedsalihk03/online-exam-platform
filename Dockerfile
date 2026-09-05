@@ -10,7 +10,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     ARGOS_DEVICE_TYPE=cpu
 RUN python3 -m venv /opt/venv
 COPY server/translation/requirements.txt /tmp/translation-requirements.txt
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r /tmp/translation-requirements.txt
 WORKDIR /app
 COPY package.json package-lock.json ./
