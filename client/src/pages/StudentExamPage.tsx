@@ -41,6 +41,7 @@ export function StudentExamPage() {
   }>()
 
   const [loading, setLoading] = useState(true)
+  const [translationError, setTranslationError] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [availability, setAvailability] = useState<string>('available')
   const [startTime, setStartTime] = useState<string | null>(null)
@@ -69,7 +70,7 @@ export function StudentExamPage() {
     async function loadPublicExam() {
       if (!publicToken) return
       setLoading(true)
-      const data = await getPublicExamApi(publicToken)
+      const data = await getPublicExamApi(publicToken, getPublicExamSession(publicToken)?.language || 'English')
 
       if (!data) {
         setErrorMsg('Unable to connect to server. Please try again later.')
@@ -98,6 +99,10 @@ export function StudentExamPage() {
       } else if (data.exam && data.exam.defaultLanguage && languages.includes(data.exam.defaultLanguage)) {
         setSelectedLanguage(data.exam.defaultLanguage)
         setSecondsRemaining((data.exam.durationMinutes || 90) * 60)
+      }
+      if (savedSession && data.translationStatus !== 'ready') {
+        setTranslationError('Translations are not ready. Please retry shortly or choose another language.')
+        setHasStarted(false)
       }
       setQuestions(shuffleArray(data.questions || []))
       setPreviewPage(1)
@@ -149,56 +154,35 @@ export function StudentExamPage() {
     
     setLoading(true)
 
-    let finalQuestions = [...questions]
-    let retryAttempted = false
-
+    setTranslationError(null)
     try {
-      const fetchAndCheck = async () => {
-        const data = await getPublicExamApi(publicToken)
-        if (data && data.questions && data.questions.length > 0) {
-          const firstQ = data.questions[0]
-          const hasTranslation = selectedLanguage === 'English' || 
-            (firstQ.translations || []).some((t: any) => t.language && t.language.toLowerCase() === selectedLanguage.toLowerCase())
-          return { data, hasTranslation }
-        }
-        return { data: null, hasTranslation: false }
+      let data = await getPublicExamApi(publicToken, selectedLanguage)
+      // Poll the completeness of every question and option, not just question one.
+      for (let attempt = 0; data?.translationStatus === 'pending' && attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        data = await getPublicExamApi(publicToken, selectedLanguage)
       }
-
-      let result = await fetchAndCheck()
-      
-      if (!result.hasTranslation && selectedLanguage !== 'English') {
-        // Wait 2 seconds and retry once for background translations to finish
-        await new Promise(r => setTimeout(r, 2000))
-        result = await fetchAndCheck()
-        retryAttempted = true
+      if (!data || data.error || data.translationStatus !== 'ready') {
+        throw new Error(data?.error || (data?.translationStatus === 'failed'
+          ? 'Translation is currently unavailable for this language. Please retry shortly or choose another language.'
+          : 'Translations are still being prepared. Please retry shortly.'))
       }
-
-      if (retryAttempted && !result.hasTranslation) {
-        console.warn(`Translation for ${selectedLanguage} not found after retry. Proceeding with available data.`)
-      }
-
-      if (result.data && result.data.questions) {
-        // Apply the previously established shuffle order to the newly fetched question array
-        const fetchedQuestionsMap = new Map(result.data.questions.map((q: any) => [q.id, q]))
-        finalQuestions = questions.map((existingQ) => {
-          const freshQ = fetchedQuestionsMap.get(existingQ.id)
-          return freshQ || existingQ
-        })
-        setQuestions(finalQuestions)
-      }
-
+      const fetchedQuestionsMap = new Map(data.questions.map((q: any) => [q.id, q]))
+      setQuestions(questions.map(q => fetchedQuestionsMap.get(q.id) || q))
     } catch (error) {
-      console.warn('Failed to refetch exam data on start:', error)
-      // Proceed using existing (pre-refetch) questions state
+      setTranslationError(error instanceof Error ? error.message : 'Unable to load translations. Please retry.')
+      setLoading(false)
+      return
     }
 
     const durationSeconds = (exam?.durationMinutes || 90) * 60
+    const previousSession = getPublicExamSession(publicToken)
     const session = {
       language: selectedLanguage,
-      endsAt: Date.now() + durationSeconds * 1000,
+      endsAt: previousSession?.endsAt || Date.now() + durationSeconds * 1000,
     }
     savePublicExamSession(publicToken, session)
-    setSecondsRemaining(durationSeconds)
+    setSecondsRemaining(Math.max(0, Math.ceil((session.endsAt - Date.now()) / 1000)))
     setHasStarted(true)
     setLoading(false)
   }
@@ -342,6 +326,7 @@ export function StudentExamPage() {
               })}
             </div>
 
+            {translationError && <p role="alert" style={{ color: '#b91c1c', marginBottom: '1rem' }}>{translationError}</p>}
             <button
               type="button"
               className="btn btn-primary"
@@ -429,7 +414,7 @@ export function StudentExamPage() {
               const translation = (q.translations || []).find(
                 (t: any) => t.language && t.language.toLowerCase() === selectedLanguage.toLowerCase()
               )
-              const questionTextDisplay = translation?.questionText || q.questionText || q.text || `Question ${globalIndex}`
+              const questionTextDisplay = selectedLanguage === 'English' ? q.questionText : (translation?.questionText || q.questionText)
 
               return (
                 <div key={q.id || globalIndex} className="student-question-item">
@@ -442,7 +427,7 @@ export function StudentExamPage() {
                   )}
 
                   <div className="student-q-content">
-                    <h3 className="student-q-text">{questionTextDisplay}</h3>
+                    <h3 className="student-q-text" dir="auto">{questionTextDisplay}</h3>
 
                     <div className="student-options-list">
                       {(q.options || []).map((opt: any) => {
@@ -450,7 +435,7 @@ export function StudentExamPage() {
                         const optTranslation = (opt.translations || []).find(
                           (ot: any) => ot.language && ot.language.toLowerCase() === selectedLanguage.toLowerCase()
                         )
-                        const text = optTranslation?.optionText || opt.optionText || opt.text
+                        const text = selectedLanguage === 'English' ? opt.optionText : (optTranslation?.optionText || opt.optionText)
                         const imageUrl = opt.imageUrl || opt.image
                         const isChecked = studentAnswers[q.id] === letter
 
@@ -463,7 +448,7 @@ export function StudentExamPage() {
                               onChange={() => handleSelectAnswer(q.id, letter)}
                               className="student-option-radio"
                             />
-                            <div className="student-option-content">
+                            <div className="student-option-content" dir="auto">
                               {(text || !imageUrl) && (
                                 <span className="student-option-text">
                                   <strong>{letter}.</strong> {text}

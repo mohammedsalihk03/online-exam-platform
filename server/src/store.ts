@@ -1,6 +1,6 @@
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import { supabase, isSupabaseConfigured } from './supabase.js'
-import { translateTextsLocal } from './translator.js'
+import { translateTextsLocal, languageCodeMap } from './translator.js'
 
 export interface ExamRecord {
   id: string
@@ -28,7 +28,7 @@ export interface QuestionOptionRecord {
   optionLetter: 'A' | 'B' | 'C' | 'D'
   optionText: string
   imageUrl?: string | null
-  isCorrect: boolean
+  isCorrect?: boolean
   translations?: OptionTranslationRecord[]
 }
 
@@ -70,8 +70,9 @@ const initialExam: ExamRecord = {
 }
 
 memoryExams.set(sampleExamId, initialExam)
+memoryExams.set(sampleCreatorToken, initialExam)
+memoryExams.set(samplePublicToken, initialExam)
 memoryExams.set(`pub_${samplePublicToken}`, initialExam)
-memoryExams.set(`creator_${sampleCreatorToken}`, initialExam)
 
 memoryQuestions.set(sampleExamId, [])
 
@@ -153,51 +154,89 @@ export async function createExamStore(data: {
   }
 
   // Fallback / In-Memory
-  memoryExams.set(id, newExam)
-  memoryExams.set(publicToken, newExam)
-  memoryExams.set(`creator_${creatorToken}`, newExam)
-  memoryExams.set(`pub_${publicToken}`, newExam)
+  indexExamInMemory(newExam)
   memoryQuestions.set(id, [])
   return newExam
 }
 
-export async function getExamByIdOrTokenStore(identifier: string): Promise<ExamRecord | null> {
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function indexExamInMemory(exam: ExamRecord): void {
+  memoryExams.set(exam.id, exam)
+  memoryExams.set(exam.creatorToken, exam)
+  memoryExams.set(exam.publicToken, exam)
+  if (!exam.publicToken.startsWith('pub_')) {
+    memoryExams.set(`pub_${exam.publicToken}`, exam)
+  }
+}
+
+function mapExamRow(data: any): ExamRecord {
+  return {
+    id: data.id,
+    title: data.title,
+    description: data.description,
+    questionCount: data.question_count,
+    durationMinutes: data.duration_minutes,
+    startTime: data.start_time,
+    endTime: data.end_time,
+    defaultLanguage: data.default_language,
+    status: data.status,
+    creatorToken: data.creator_token,
+    publicToken: data.public_token,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
+  }
+}
+
+/** Public student routes only — never accepts creator tokens or bare exam UUIDs. */
+export async function getExamByPublicTokenStore(publicToken: string): Promise<ExamRecord | null> {
   if (isSupabaseConfigured && supabase) {
     try {
       const { data, error } = await supabase
         .from('exams')
         .select('*')
-        .or(`id.eq.${identifier},creator_token.eq.${identifier},public_token.eq.${identifier}`)
+        .eq('public_token', publicToken)
         .single()
 
-      if (!error && data) {
-        return {
-          id: data.id,
-          title: data.title,
-          description: data.description,
-          questionCount: data.question_count,
-          durationMinutes: data.duration_minutes,
-          startTime: data.start_time,
-          endTime: data.end_time,
-          defaultLanguage: data.default_language,
-          status: data.status,
-          creatorToken: data.creator_token,
-          publicToken: data.public_token,
-          createdAt: data.created_at,
-          updatedAt: data.updated_at,
-        }
-      }
+      if (!error && data) return mapExamRow(data)
     } catch (e) {
-      console.error('Supabase exception in getExam:', e)
+      console.error('Supabase exception in getExamByPublicToken:', e)
     }
   }
 
-  return (
-    memoryExams.get(identifier) ||
-    memoryExams.get(`creator_${identifier}`) ||
-    memoryExams.get(`pub_${identifier}`) ||
-    null
-  )
+  return memoryExams.get(publicToken) || memoryExams.get(`pub_${publicToken}`) || null
+}
+
+/** Creator routes only — accepts exam UUID or creator_token, never public_token. */
+export async function getExamByCreatorIdentifierStore(identifier: string): Promise<ExamRecord | null> {
+  if (!UUID_PATTERN.test(identifier) && !identifier.startsWith('creator_')) {
+    return null
+  }
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const field = UUID_PATTERN.test(identifier) ? 'id' : 'creator_token'
+      const { data, error } = await supabase
+        .from('exams')
+        .select('*')
+        .eq(field, identifier)
+        .single()
+
+      if (!error && data) return mapExamRow(data)
+    } catch (e) {
+      console.error('Supabase exception in getExamByCreatorIdentifier:', e)
+    }
+  }
+
+  if (UUID_PATTERN.test(identifier)) {
+    return memoryExams.get(identifier) || null
+  }
+  return memoryExams.get(identifier) || null
+}
+
+/** @deprecated Internal scoring only — loads exam by public token for submit handler. */
+export async function getExamByIdOrTokenStore(identifier: string): Promise<ExamRecord | null> {
+  return getExamByPublicTokenStore(identifier)
 }
 
 export async function getExamStatisticsStore(): Promise<{ totalExams: number; activeExams: number }> {
@@ -265,98 +304,80 @@ export async function getRecentExamsStore(limit = 5): Promise<ExamRecord[]> {
     .slice(0, limit)
 }
 
-async function generateAndSaveTranslationsAsync(
-  examId: string,
-  questionId: string,
-  questionText: string,
-  options: QuestionOptionRecord[]
-): Promise<void> {
-  const autoLanguages = ['Hindi', 'Arabic', 'Urdu']
-  const sourceTexts = [questionText, ...options.map((o) => o.optionText)]
+// A source fingerprint invalidates old English fallbacks and results from edited text.
+function sourceHash(text: string): string {
+  return createHash('sha256').update('translation-v2:' + text).digest('hex')
+}
 
-  try {
-    const results = await Promise.all(
-      autoLanguages.map(async (lang) => {
-        try {
-          const translatedBatch = await translateTextsLocal(sourceTexts, lang)
-          return {
-            language: lang,
-            questionText: translatedBatch[0] || questionText,
-            optionTexts: options.map((_, idx) => translatedBatch[idx + 1] || options[idx].optionText),
-          }
-        } catch (e) {
-          console.warn(`Translation error for ${lang}:`, e)
-          return null
-        }
+type TranslationJob = { state: 'pending' | 'failed'; retryAt: number }
+const translationJobs = new Map<string, TranslationJob>()
+
+function hasTranslation(q: QuestionRecord, language: string): boolean {
+  return (!q.questionText.trim() || Boolean(q.translations?.some(t => t.language === language && t.questionText.trim()))) &&
+    q.options.every(o => !o.optionText.trim() || o.translations?.some(t => t.language === language && t.optionText.trim()))
+}
+
+export function ensureTranslations(examId: string, questions: QuestionRecord[], language: string): 'ready' | 'pending' | 'failed' {
+  if (!languageCodeMap[language]) throw new Error('Unsupported language')
+  if (language === 'English') return 'ready'
+  let state: 'ready' | 'pending' | 'failed' = 'ready'
+  for (const q of questions) {
+    if (hasTranslation(q, language)) continue
+    const fingerprint = sourceHash(JSON.stringify([q.questionText, ...q.options.map(o => [o.optionLetter, o.optionText])]))
+    const key = `${examId}:${q.id}:${language}:${fingerprint}`
+    let job = translationJobs.get(key)
+    if (!job || (job.state === 'failed' && Date.now() >= job.retryAt)) {
+      job = { state: 'pending', retryAt: 0 }
+      translationJobs.set(key, job)
+      const currentJob = job
+      void generateTranslation(examId, q, language).then(() => {
+        translationJobs.delete(key)
+      }).catch(error => {
+        console.warn(`Translation failed (${q.id}, ${language}):`, error instanceof Error ? error.message : error)
+        currentJob.state = 'failed'
+        currentJob.retryAt = Date.now() + 30_000
+        // Failed entries need only survive the retry cooldown.
+        setTimeout(() => { if (translationJobs.get(key) === currentJob) translationJobs.delete(key) }, 30_000).unref()
       })
-    )
-
-    for (const res of results) {
-      if (!res) continue
-
-      // 1. Supabase update
-      if (isSupabaseConfigured && supabase) {
-        try {
-          await supabase.from('question_translations').upsert([
-            {
-              question_id: questionId,
-              language: res.language,
-              question_text: res.questionText,
-            },
-          ])
-
-          for (let i = 0; i < options.length; i++) {
-            const opt = options[i]
-            if (opt.id) {
-              await supabase.from('option_translations').upsert([
-                {
-                  option_id: opt.id,
-                  language: res.language,
-                  option_text: res.optionTexts[i] || opt.optionText,
-                },
-              ])
-            }
-          }
-        } catch (dbErr) {
-          console.warn('Supabase update warning for async translations:', dbErr)
-        }
-      }
-
-      // 2. Memory store update
-      const list = memoryQuestions.get(examId) || []
-      const qIdx = list.findIndex((q) => q.id === questionId)
-      if (qIdx >= 0) {
-        const q = list[qIdx]
-        const qTrans = q.translations || [{ language: q.language || 'English', questionText: q.questionText }]
-        const existingQTIdx = qTrans.findIndex((t) => t.language === res.language)
-        if (existingQTIdx >= 0) {
-          qTrans[existingQTIdx] = { language: res.language, questionText: res.questionText }
-        } else {
-          qTrans.push({ language: res.language, questionText: res.questionText })
-        }
-        q.translations = qTrans
-
-        q.options = q.options.map((opt, optIdx) => {
-          const optTrans = opt.translations || [{ language: q.language || 'English', optionText: opt.optionText }]
-          const existingOTIdx = optTrans.findIndex((t) => t.language === res.language)
-          const textForLang = res.optionTexts[optIdx] || opt.optionText
-          if (existingOTIdx >= 0) {
-            optTrans[existingOTIdx] = { language: res.language, optionText: textForLang }
-          } else {
-            optTrans.push({ language: res.language, optionText: textForLang })
-          }
-          return {
-            ...opt,
-            translations: optTrans,
-          }
-        })
-
-        list[qIdx] = q
-        memoryQuestions.set(examId, list)
-      }
     }
-  } catch (err) {
-    console.warn('Async translation error:', err)
+    if (job.state === 'failed') state = 'failed'
+    else if (state !== 'failed') state = 'pending'
+  }
+  return state
+}
+
+async function generateTranslation(examId: string, q: QuestionRecord, language: string): Promise<void> {
+  const sources = [q.questionText, ...q.options.map(o => o.optionText)]
+  let batch: string[]
+  try {
+    batch = await translateTextsLocal(sources, language)
+  } catch (error) {
+    console.error(`Translation batch failed (${q.id}, ${language}):`, error instanceof Error ? error.message : error)
+    batch = [...sources]
+  }
+  if (isSupabaseConfigured && supabase) {
+    const { error } = await supabase.from('question_translations').upsert([{
+      question_id: q.id, language, question_text: batch[0], source_hash: sourceHash(q.questionText),
+    }], { onConflict: 'question_id,language' })
+    if (error) throw error
+    for (const [index, option] of q.options.entries()) {
+      if (!option.id) throw new Error('Cannot persist translation without option ID')
+      const { error } = await supabase.from('option_translations').upsert([{
+        option_id: option.id, language, option_text: batch[index + 1], source_hash: sourceHash(option.optionText),
+      }], { onConflict: 'option_id,language' })
+      if (error) throw error
+    }
+  }
+  const current = memoryQuestions.get(examId)?.find(item => item.id === q.id)
+  if (!current) return
+  if (current.questionText === q.questionText) {
+    current.translations = [...(current.translations || []).filter(t => t.language !== language), { language, questionText: batch[0] }]
+  }
+  for (const [index, oldOption] of q.options.entries()) {
+    const option = current.options.find(o => o.optionLetter === oldOption.optionLetter)
+    if (option && option.optionText === oldOption.optionText) {
+      option.translations = [...(option.translations || []).filter(t => t.language !== language), { language, optionText: batch[index + 1] }]
+    }
   }
 }
 
@@ -371,7 +392,13 @@ export async function saveQuestionStore(
     options: QuestionOptionRecord[]
   }
 ): Promise<QuestionRecord> {
-  const qId = data.id || randomUUID()
+  // The existing builder uses local IDs such as q-1; Supabase requires UUIDs.
+  // Resolve those IDs by exam/order so navigation updates the same stored question.
+  let qId = data.id
+  if (!qId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(qId)) {
+    const existing = await getQuestionsByExamIdStore(examId)
+    qId = existing.find(q => q.questionOrder === data.questionOrder)?.id || randomUUID()
+  }
   const sourceLang = data.language || 'English'
 
   const qRecord: QuestionRecord = {
@@ -400,19 +427,21 @@ export async function saveQuestionStore(
         },
       ])
 
+      if (qErr) throw qErr
       if (!qErr) {
         // Upsert Translation for source language
-        await supabase.from('question_translations').upsert([
+        const { error: sourceError } = await supabase.from('question_translations').upsert([
           {
             question_id: qRecord.id,
             language: qRecord.language,
             question_text: qRecord.questionText,
           },
-        ])
+        ], { onConflict: 'question_id,language' })
+        if (sourceError) throw sourceError
 
         // Upsert Options
         for (const opt of qRecord.options) {
-          const { data: savedOpt } = await supabase
+          const { data: savedOpt, error: optionError } = await supabase
             .from('question_options')
             .upsert([
               {
@@ -422,25 +451,28 @@ export async function saveQuestionStore(
                 image_url: opt.imageUrl || null,
                 is_correct: opt.isCorrect,
               },
-            ])
+            ], { onConflict: 'question_id,option_letter' })
             .select()
             .single()
 
+          if (optionError) throw optionError
           const optId = savedOpt?.id || opt.id
           if (optId) {
             opt.id = optId
-            await supabase.from('option_translations').upsert([
+            const { error: optionTranslationError } = await supabase.from('option_translations').upsert([
               {
                 option_id: optId,
                 language: qRecord.language,
                 option_text: opt.optionText,
               },
-            ])
+            ], { onConflict: 'option_id,language' })
+            if (optionTranslationError) throw optionTranslationError
           }
         }
       }
     } catch (e) {
       console.error('Supabase exception saving question:', e)
+      throw e
     }
   }
 
@@ -454,10 +486,9 @@ export async function saveQuestionStore(
   }
   memoryQuestions.set(examId, list)
 
-  // Asynchronously generate Hindi, Arabic, Urdu translations in background (parallel non-blocking)
-  generateAndSaveTranslationsAsync(examId, qRecord.id, data.questionText, qRecord.options).catch(
-    (err) => console.warn('Background translation error:', err)
-  )
+  for (const language of ['Hindi', 'Arabic', 'Malayalam', 'Urdu']) {
+    ensureTranslations(examId, [qRecord], language)
+  }
 
   return qRecord
 }
@@ -474,21 +505,23 @@ export async function getQuestionsByExamIdStore(
           id,
           question_order,
           image_url,
-          question_translations (language, question_text),
-          question_options (id, option_letter, option_text, image_url, is_correct, option_translations (language, option_text))
+          question_translations (language, question_text, source_hash),
+          question_options (id, option_letter, option_text, image_url, is_correct, option_translations (language, option_text, source_hash))
         `)
         .eq('exam_id', examId)
         .order('question_order', { ascending: true })
 
+      if (qErr) throw qErr
       if (!qErr && qData) {
         return qData.map((q: any) => {
-          const translations = (q.question_translations || []).map((t: any) => ({
+          const englishText = (q.question_translations || []).find((t: any) => t.language === 'English')?.question_text || ''
+          const translations = (q.question_translations || []).filter((t: any) => t.language === 'English' || t.source_hash === sourceHash(englishText)).map((t: any) => ({
             language: t.language,
             questionText: t.question_text,
           }))
           const mainTrans = translations.find((t: any) => t.language === 'English') || translations[0]
           const opts = (q.question_options || []).map((o: any) => {
-            const optTranslations = (o.option_translations || []).map((ot: any) => ({
+            const optTranslations = (o.option_translations || []).filter((t: any) => t.language === 'English' || t.source_hash === sourceHash(o.option_text)).map((ot: any) => ({
               language: ot.language,
               optionText: ot.option_text,
             }))
@@ -497,7 +530,7 @@ export async function getQuestionsByExamIdStore(
               optionLetter: o.option_letter,
               optionText: o.option_text,
               imageUrl: o.image_url || null,
-              isCorrect: isPublic ? false : Boolean(o.is_correct),
+              ...(isPublic ? {} : { isCorrect: Boolean(o.is_correct) }),
               translations: optTranslations.length > 0 ? optTranslations : [{ language: 'English', optionText: o.option_text }],
             }
           })
@@ -516,6 +549,7 @@ export async function getQuestionsByExamIdStore(
       }
     } catch (e) {
       console.error('Supabase exception fetching questions:', e)
+      throw e
     }
   }
 
@@ -527,12 +561,11 @@ export async function getQuestionsByExamIdStore(
     return list.map((q) => ({
       ...q,
       translations: q.translations || [{ language: q.language || 'English', questionText: q.questionText }],
-      options: q.options.map((o) => ({
+      options: q.options.map(({ isCorrect: _isCorrect, ...o }) => ({
         ...o,
         optionLetter: o.optionLetter,
         optionText: o.optionText,
         imageUrl: o.imageUrl || null,
-        isCorrect: false, // Stripped!
         translations: o.translations || [{ language: q.language || 'English', optionText: o.optionText }],
       })),
     }))
@@ -551,7 +584,7 @@ export async function getQuestionsByExamIdStore(
 }
 
 export async function publishExamStore(examId: string): Promise<ExamRecord | null> {
-  const exam = await getExamByIdOrTokenStore(examId)
+  const exam = await getExamByCreatorIdentifierStore(examId)
   if (!exam) return null
 
   if (!exam.publicToken) {
@@ -569,10 +602,7 @@ export async function publishExamStore(examId: string): Promise<ExamRecord | nul
     }
   }
 
-  memoryExams.set(exam.id, exam)
-  memoryExams.set(exam.publicToken, exam)
-  memoryExams.set(`pub_${exam.publicToken}`, exam)
-  memoryExams.set(`creator_${exam.creatorToken}`, exam)
+  indexExamInMemory(exam)
   return exam
 }
 

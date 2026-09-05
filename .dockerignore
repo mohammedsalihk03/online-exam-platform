@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.venv
+**/.env
+**/.env.*
+**/.translation-data
+**/.translation-cache
+**/.translation-config
+**/__pycache__
+.git
+reference
+**/*.log

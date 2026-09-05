@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:3001/api'
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
 
 export interface ExamData {
   id?: string
@@ -145,9 +145,9 @@ export async function publishExamApi(examId: string) {
 }
 
 // 5. Fetch Public Student Exam Data (Strips is_correct for Security!)
-export async function getPublicExamApi(publicToken: string) {
+export async function getPublicExamApi(publicToken: string, language = 'English') {
   try {
-    const res = await fetch(`${API_BASE_URL}/public/exams/${publicToken}`)
+    const res = await fetch(`${API_BASE_URL}/public/exams/${publicToken}?language=${encodeURIComponent(language)}`)
     const json = await res.json()
     if (!res.ok) {
       return {

@@ -1,92 +1,67 @@
-import { spawn } from 'child_process'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-const languageCodeMap: { [key: string]: string } = {
-  Hindi: 'hi',
-  Arabic: 'ar',
-  Urdu: 'ur',
+export const languageCodeMap: Record<string, string> = {
+  English: 'en', Hindi: 'hi', Arabic: 'ar', Malayalam: 'ml', Urdu: 'ur',
 }
 
-export async function translateTextsLocal(
-  texts: string[],
-  targetLanguageName: string
-): Promise<string[]> {
-  const targetCode = languageCodeMap[targetLanguageName]
-  if (!targetCode) {
-    return texts
-  }
+let queue: Promise<unknown> = Promise.resolve()
 
-  const validTexts = texts.map((t) => t || '')
-  if (validTexts.every((t) => !t.trim())) {
-    return validTexts
-  }
-
-  return new Promise<string[]>((resolve) => {
-    try {
-      const pythonScript = `
-import sys, json, io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-
-try:
-    data = json.load(sys.stdin)
-    texts = data.get('texts', [])
-    target = data.get('target', 'hi')
-
-    import argostranslate.translate
-    installed = argostranslate.translate.get_installed_languages()
-    lang_en = next((l for l in installed if l.code == 'en'), None)
-    lang_to = next((l for l in installed if l.code == target), None)
-
-    results = []
-    if lang_en and lang_to:
-        translator = lang_en.get_translation(lang_to)
-        for t in texts:
-            if t and t.strip():
-                try:
-                    results.append(translator.translate(t))
-                except Exception:
-                    results.append(t)
-            else:
-                results.append('')
-    else:
-        results = texts
-
-    print(json.dumps({'results': results}, ensure_ascii=False))
-except Exception as e:
-    print(json.dumps({'error': str(e)}))
-`
-
-      const child = spawn('python', ['-c', pythonScript])
-      let outputData = ''
-
-      child.stdout.on('data', (chunk) => {
-        outputData += chunk.toString('utf-8')
-      })
-
-      child.on('close', (code) => {
-        if (code === 0 && outputData.trim()) {
-          try {
-            const parsed = JSON.parse(outputData.trim())
-            if (parsed.results && Array.isArray(parsed.results)) {
-              return resolve(parsed.results)
-            }
-          } catch (e) {
-            console.warn('Translation JSON parse error:', e)
-          }
+function translateViaPython(texts: string[], target: string): Promise<string[]> {
+  const task = queue.then(() => new Promise<string[]>((resolve) => {
+    const child = spawn(process.env.PYTHON_COMMAND || (process.platform === 'win32' ? 'python' : 'python3'),
+      [fileURLToPath(new URL('../translation/translate.py', import.meta.url))],
+      { env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, windowsHide: true })
+    let output = ''
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill()
+      console.error(`Translation timed out for ${target}; using English fallback`)
+      resolve([...texts])
+    }, 180_000)
+    child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk })
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-4000) })
+    child.on('error', error => {
+      clearTimeout(timeout)
+      console.error(`Translation subprocess error for ${target}:`, error)
+      resolve([...texts])
+    })
+    child.stdin.on('error', error => {
+      clearTimeout(timeout)
+      console.error(`Translation stdin error for ${target}:`, error)
+      resolve([...texts])
+    })
+    child.on('close', code => {
+      clearTimeout(timeout)
+      if (stderr.trim()) console.error(`Translation stderr (${target}):`, stderr.trim())
+      try {
+        const parsed = JSON.parse(output)
+        if (code !== 0 || parsed.error) throw new Error(parsed.error || stderr || `Python exited ${code}`)
+        if (!Array.isArray(parsed.results) || parsed.results.length !== texts.length) {
+          throw new Error('Translation returned an incomplete batch')
         }
-        resolve(validTexts)
-      })
+        resolve(parsed.results.map((translated: unknown, index: number) => {
+          const source = texts[index]
+          if (!source.trim()) return source
+          if (typeof translated === 'string' && translated.trim()) return translated
+          console.error(`Translation empty for ${target} item ${index}; using English fallback`)
+          return source
+        }))
+      } catch (error) {
+        console.error(`Translation parse failure for ${target}:`, error instanceof Error ? error.message : error)
+        resolve([...texts])
+      }
+    })
+    child.stdin.end(JSON.stringify({ texts, target }))
+  }))
+  queue = task.catch(() => undefined)
+  return task
+}
 
-      child.on('error', (err) => {
-        console.warn('Translation process error:', err)
-        resolve(validTexts)
-      })
-
-      child.stdin.write(JSON.stringify({ texts: validTexts, target: targetCode }))
-      child.stdin.end()
-    } catch (err) {
-      console.warn('Failed to start translation script:', err)
-      resolve(validTexts)
-    }
-  })
+export function translateTextsLocal(texts: string[], language: string): Promise<string[]> {
+  if (language === 'English') return Promise.resolve([...texts])
+  const target = languageCodeMap[language]
+  if (!target) return Promise.reject(new Error(`Unsupported language: ${language}`))
+  if (texts.every(t => !t.trim())) return Promise.resolve([...texts])
+  return translateViaPython(texts, target)
 }

@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS question_translations (
   question_id UUID NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
   language TEXT NOT NULL,
   question_text TEXT NOT NULL DEFAULT '',
+  source_hash TEXT,
   UNIQUE(question_id, language)
 );
 
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS option_translations (
   option_id UUID NOT NULL REFERENCES question_options(id) ON DELETE CASCADE,
   language TEXT NOT NULL,
   option_text TEXT NOT NULL DEFAULT '',
+  source_hash TEXT,
   UNIQUE(option_id, language)
 );
 

@@ -9,6 +9,12 @@ server/dist/
 # Environment
 .env
 .env.*
+!.env.example
+.venv/
+__pycache__/
+.translation-data/
+.translation-cache/
+.translation-config/
 
 # Logs
 *.log

@@ -1,15 +1,18 @@
 import cors from 'cors'
 import express from 'express'
 import dotenv from 'dotenv'
+import { languageCodeMap } from './translator.js'
 import {
   createExamStore,
-  getExamByIdOrTokenStore,
+  getExamByPublicTokenStore,
+  getExamByCreatorIdentifierStore,
   getExamStatisticsStore,
   getRecentExamsStore,
   saveQuestionStore,
   getQuestionsByExamIdStore,
   publishExamStore,
   uploadImageStore,
+  ensureTranslations,
 } from './store.js'
 
 dotenv.config()
@@ -18,7 +21,9 @@ const app = express()
 const PORT = process.env.PORT ?? 3001
 
 // Middleware
-app.use(cors())
+const allowedOrigins = process.env.CORS_ORIGIN?.split(',').map(origin => origin.trim()).filter(Boolean)
+if (process.env.NODE_ENV === 'production' && !allowedOrigins?.length) throw new Error('CORS_ORIGIN is required in production')
+app.use(cors({ origin: allowedOrigins || true }))
 app.use(express.json({ limit: '10mb' }))
 
 // Health Check
@@ -88,7 +93,7 @@ app.post('/api/exams', async (req, res) => {
 app.get('/api/creator/exams/:id', async (req, res) => {
   try {
     const { id } = req.params
-    const exam = await getExamByIdOrTokenStore(id)
+    const exam = await getExamByCreatorIdentifierStore(id)
     if (!exam) {
       return res.status(404).json({ error: 'Exam not found' })
     }
@@ -112,7 +117,7 @@ app.post('/api/creator/exams/:id/questions', async (req, res) => {
     const { id } = req.params
     const { questionId, questionOrder, questionText, language, imageUrl, options } = req.body
 
-    const exam = await getExamByIdOrTokenStore(id)
+    const exam = await getExamByCreatorIdentifierStore(id)
     if (!exam) {
       return res.status(404).json({ error: 'Exam not found' })
     }
@@ -194,7 +199,7 @@ app.post('/api/upload', async (req, res) => {
 app.get('/api/public/exams/:publicToken', async (req, res) => {
   try {
     const { publicToken } = req.params
-    const exam = await getExamByIdOrTokenStore(publicToken)
+    const exam = await getExamByPublicTokenStore(publicToken)
 
     if (!exam) {
       return res.status(404).json({ error: 'Exam not found or link is invalid' })
@@ -225,10 +230,14 @@ app.get('/api/public/exams/:publicToken', async (req, res) => {
 
     // SECURITY GUARANTEE: isPublic = true strips all is_correct flags!
     const questions = await getQuestionsByExamIdStore(exam.id, true)
+    const language = typeof req.query.language === 'string' ? req.query.language : 'English'
+    if (!languageCodeMap[language]) return res.status(400).json({ error: 'Unsupported language' })
+    const translationStatus = ensureTranslations(exam.id, questions, language)
 
     return res.json({
       success: true,
       availability: 'available',
+      translationStatus,
       exam: {
         id: exam.id,
         title: exam.title,
@@ -252,7 +261,7 @@ app.post('/api/public/exams/:publicToken/submit', async (req, res) => {
     const { publicToken } = req.params
     const { answers } = req.body // { [questionId]: optionLetter }
 
-    const exam = await getExamByIdOrTokenStore(publicToken)
+    const exam = await getExamByPublicTokenStore(publicToken)
     if (!exam) {
       return res.status(404).json({ error: 'Exam not found' })
     }
